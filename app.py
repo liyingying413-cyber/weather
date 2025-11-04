@@ -1,4 +1,4 @@
-# Weather — Click on Map (instant update + city popup)
+# Weather — Click on Map (instant update + city popup, using st.rerun)
 import requests
 import pandas as pd
 import streamlit as st
@@ -57,7 +57,7 @@ units = st.sidebar.radio("Units", ["metric (°C, km/h)", "imperial (°F, mph)"],
 metric = units.startswith("metric")
 if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
-    st.experimental_rerun()
+    st.rerun()
 
 # ---------------- State init ----------------
 if "loc" not in st.session_state:
@@ -69,7 +69,7 @@ if "zoom" not in st.session_state:
     st.session_state["zoom"] = 5  # default zoom
 
 st.title("⛅ Weather — Click any place on the map")
-st.caption("点击地图立即显示该城市的天气；找不到城市名时显示坐标。")
+st.caption("点击地图立即显示该城市天气；找不到城市名时显示坐标。")
 
 # ---------------- Map (center/marker uses current state) ----------------
 loc = st.session_state["loc"]
@@ -80,17 +80,14 @@ m = folium.Map(
     tiles="cartodbpositron"
 )
 
-# Popup（城市名 + 坐标），并默认展开 show=True
 popup_html = f"<b>{format_place(loc) or 'Selected point'}</b><br>{loc['latitude']:.4f}, {loc['longitude']:.4f}"
-popup = folium.Popup(popup_html, max_width=260, show=True)
-
 marker = folium.Marker(
     [loc["latitude"], loc["longitude"]],
     tooltip=f"{format_place(loc) or 'Selected point'}",
+    popup=folium.Popup(popup_html, max_width=260, show=True),
     icon=folium.Icon(color="blue"),
 )
 marker.add_to(m)
-popup.add_to(marker)  # 关键：让 popup 默认展开
 
 out = st_folium(m, height=480, use_container_width=True)
 
@@ -114,8 +111,8 @@ if out and out.get("last_clicked"):
         "name": name, "admin1": admin1, "country": country,
         "latitude": lat, "longitude": lon, "timezone": tz
     }
-    st.session_state["zoom"] = 10  # 更近，城市级
-    st.experimental_rerun()        # 立即重绘：标记移动、气泡展开、标题更新
+    st.session_state["zoom"] = 10  # zoom 到城市级
+    st.rerun()                    # ← 新版 API：立即重绘
 
 # ---------------- Weather display ----------------
 loc = st.session_state["loc"]
