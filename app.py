@@ -1,4 +1,4 @@
-# Weather — Click on Map only (robust reverse geocode + timezone fallback)
+# Weather — Click on Map (instant update + city name)
 import requests
 import pandas as pd
 import streamlit as st
@@ -50,6 +50,9 @@ def fetch_forecast(lat: float, lon: float, tz: str, metric: bool):
     r.raise_for_status()
     return r.json()
 
+def format_place(loc: dict) -> str:
+    return " · ".join([x for x in [loc.get("name"), loc.get("admin1"), loc.get("country")] if x])
+
 # ---------------- Sidebar (units only) ----------------
 st.sidebar.header("Options")
 units = st.sidebar.radio("Units", ["metric (°C, km/h)", "imperial (°F, mph)"], index=0)
@@ -58,26 +61,35 @@ if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.experimental_rerun()
 
-# ---------------- Map ----------------
-st.title("⛅ Weather — Click any place on the map")
-st.caption("Zoom到城市后点击地图即可。若点击海面或无人区，会自动回退为坐标点的天气。")
-
-# 首次默认到首尔；之后都以用户点击为准
+# ---------------- State init ----------------
 if "loc" not in st.session_state:
     st.session_state["loc"] = {
         "name": "Seoul", "admin1": "Seoul", "country": "South Korea",
         "latitude": 37.57, "longitude": 126.98, "timezone": "Asia/Seoul"
     }
+if "zoom" not in st.session_state:
+    st.session_state["zoom"] = 5  # default zoom
+
+# ---------------- Map (center/marker uses current state) ----------------
+st.title("⛅ Weather — Click any place on the map")
+st.caption("放大到城市后点击地图即可。我们会立刻反向地理编码并刷新城市名和天气。")
 
 loc = st.session_state["loc"]
-m = folium.Map(location=[loc["latitude"], loc["longitude"]], zoom_start=5, tiles="cartodbpositron")
-folium.Marker([loc["latitude"], loc["longitude"]],
-              tooltip=f"{loc.get('name')}, {loc.get('country','')}",
-              icon=folium.Icon(color="blue")).add_to(m)
+
+m = folium.Map(
+    location=[loc["latitude"], loc["longitude"]],
+    zoom_start=st.session_state["zoom"],
+    tiles="cartodbpositron"
+)
+folium.Marker(
+    [loc["latitude"], loc["longitude"]],
+    tooltip=f"{format_place(loc) or 'Selected point'}",
+    icon=folium.Icon(color="blue")
+).add_to(m)
 
 out = st_folium(m, height=480, use_container_width=True)
 
-# 处理点击：逆地理编码失败则使用时区兜底
+# ---------------- Handle click: update state THEN rerun immediately ----------------
 if out and out.get("last_clicked"):
     lat = float(out["last_clicked"]["lat"])
     lon = float(out["last_clicked"]["lng"])
@@ -97,15 +109,17 @@ if out and out.get("last_clicked"):
         "name": name, "admin1": admin1, "country": country,
         "latitude": lat, "longitude": lon, "timezone": tz
     }
-    loc = st.session_state["loc"]
+    # 更近的视角，立刻看到标记落在城市
+    st.session_state["zoom"] = 10
+    st.experimental_rerun()  # 关键：马上重绘，立即看到新城市名和新标记
 
 # ---------------- Weather display ----------------
-place = " · ".join([x for x in [loc.get("name"), loc.get("admin1"), loc.get("country")] if x])
-st.markdown(f"### {place}")
+loc = st.session_state["loc"]
+st.markdown(f"### {format_place(loc) or 'Selected point'}")
 
 try:
     data = fetch_forecast(loc["latitude"], loc["longitude"], loc.get("timezone","auto"), metric)
-except Exception as e:
+except Exception:
     st.error("Fetching forecast failed. Please click another point or try again.")
     st.stop()
 
