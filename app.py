@@ -1,33 +1,26 @@
-# Weather on Map — Open-Meteo (no background image)
+# Weather on Map — Click to get weather (no text search)
 import requests
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 import folium
 
-st.set_page_config(page_title="Weather — Map Picker", page_icon="⛅", layout="wide")
+st.set_page_config(page_title="Weather — Click on Map", page_icon="⛅", layout="wide")
 
-# ---------- API endpoints ----------
-GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
+# ---------------- Open-Meteo endpoints ----------------
 REVERSE = "https://geocoding-api.open-meteo.com/v1/reverse"
 FORECAST = "https://api.open-meteo.com/v1/forecast"
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def geocode(name: str, count: int = 8, language: str = "en"):
-    if not name:
-        return []
-    r = requests.get(GEOCODE, params={"name": name, "count": count, "language": language}, timeout=20)
-    r.raise_for_status()
-    return r.json().get("results", []) or []
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def reverse_geocode(lat: float, lon: float, language: str = "en"):
+    """Return nearest place info for a lat/lon."""
     r = requests.get(REVERSE, params={"latitude": lat, "longitude": lon, "language": language}, timeout=20)
     r.raise_for_status()
     return (r.json().get("results") or [None])[0]
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_forecast(lat: float, lon: float, tz: str, metric: bool):
+    """Fetch current, hourly (24h) and daily (7d) forecast."""
     params = {
         "latitude": lat, "longitude": lon, "timezone": tz or "auto",
         "current": ["temperature_2m","apparent_temperature","relative_humidity_2m","wind_speed_10m"],
@@ -42,64 +35,51 @@ def fetch_forecast(lat: float, lon: float, tz: str, metric: bool):
     r.raise_for_status()
     return r.json()
 
-# ---------- Sidebar ----------
-st.sidebar.header("🔎 Search or Pick a City")
+# ---------------- Sidebar (units only) ----------------
+st.sidebar.header("⚙️ Options")
 units = st.sidebar.radio("Units", ["metric (°C, km/h)", "imperial (°F, mph)"], index=0)
 metric = units.startswith("metric")
-q = st.sidebar.text_input("City name", value="Seoul")
-count = st.sidebar.slider("Candidates", 1, 10, 5)
+if st.sidebar.button("🔄 Clear cache"):
+    st.cache_data.clear()
+    st.experimental_rerun()
 
-# initialize default location
+# ---------------- Map ----------------
+st.title("⛅ Weather — Click any place on the map")
+st.caption("Tip: zoom to a city and click. The app will reverse-geocode that point and show its weather.")
+
+# First load center（首尔）；用户点击后即更新为点击点
 if "loc" not in st.session_state:
-    res = geocode("Seoul", count=1)
-    if res:
-        st.session_state["loc"] = res[0]
-    else:
-        st.session_state["loc"] = {
-            "name":"Seoul","latitude":37.57,"longitude":126.98,
-            "country":"South Korea","timezone":"Asia/Seoul"
-        }
+    st.session_state["loc"] = {"name":"Seoul","admin1":"Seoul","country":"South Korea",
+                               "latitude":37.57,"longitude":126.98,"timezone":"Asia/Seoul"}
 
-if st.sidebar.button("Search", use_container_width=True):
-    found = geocode(q, count=count)
-    if found:
-        st.session_state["loc"] = found[0]
-
-# ---------- Map ----------
-st.title("⛅ Weather — Open API (Map Picker)")
-st.markdown("Click on any location on the map to see its weather information.")
 loc = st.session_state["loc"]
-lat, lon = loc["latitude"], loc["longitude"]
-
-m = folium.Map(location=[lat, lon], zoom_start=4, tiles="cartodbpositron")
-folium.Marker([lat, lon],
+m = folium.Map(location=[loc["latitude"], loc["longitude"]], zoom_start=5, tiles="cartodbpositron")
+folium.Marker([loc["latitude"], loc["longitude"]],
               tooltip=f"{loc.get('name')}, {loc.get('country','')}",
               icon=folium.Icon(color="blue")).add_to(m)
-out = st_folium(m, height=420, width=None, returned_objects=[])
 
+out = st_folium(m, height=480, use_container_width=True)  # 点击地图以获取 lat/lon
+
+# When user clicks map -> reverse geocode -> update location
 if out and out.get("last_clicked"):
-    clicked = out["last_clicked"]
-    lat, lon = clicked["lat"], clicked["lng"]
+    lat = out["last_clicked"]["lat"]
+    lon = out["last_clicked"]["lng"]
     rev = reverse_geocode(lat, lon) or {}
-    if rev:
-        st.session_state["loc"] = {
-            "name": rev.get("name") or rev.get("admin1") or "Selected point",
-            "admin1": rev.get("admin1"),
-            "country": rev.get("country"),
-            "latitude": lat, "longitude": lon,
-            "timezone": rev.get("timezone") or "auto"
-        }
+    st.session_state["loc"] = {
+        "name": rev.get("name") or rev.get("admin1") or "Selected point",
+        "admin1": rev.get("admin1"),
+        "country": rev.get("country"),
+        "latitude": lat, "longitude": lon,
+        "timezone": rev.get("timezone") or "auto"
+    }
+    loc = st.session_state["loc"]
 
-# ---------- Weather display ----------
-loc = st.session_state["loc"]
-place = f"**{loc.get('name','')}**, {loc.get('admin1','')}, {loc.get('country','')}".replace(' ,','')
+# ---------------- Weather display ----------------
+place = " · ".join([x for x in [loc.get("name"), loc.get("admin1"), loc.get("country")] if x])
 st.markdown(f"### {place}")
 
 data = fetch_forecast(loc["latitude"], loc["longitude"], loc.get("timezone","auto"), metric)
-
-cur = data.get("current", {})
-daily = data.get("daily", {})
-hourly = data.get("hourly", {})
+cur, hourly, daily = data.get("current", {}), data.get("hourly", {}), data.get("daily", {})
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Temperature", f"{cur.get('temperature_2m','–')}°")
@@ -111,13 +91,9 @@ st.markdown("#### Next 24 hours")
 h_temp = (hourly.get("temperature_2m") or [])[:24]
 h_prec = (hourly.get("precipitation") or [])[:24]
 h_wind = (hourly.get("wind_speed_10m") or [])[:24]
-
-if h_temp:
-    st.line_chart({"temperature": h_temp}, height=180)
-if h_prec:
-    st.bar_chart({"precipitation": h_prec}, height=120)
-if h_wind:
-    st.line_chart({"wind": h_wind}, height=120)
+if h_temp: st.line_chart({"temperature": h_temp}, height=180)
+if h_prec: st.bar_chart({"precipitation": h_prec}, height=120)
+if h_wind: st.line_chart({"wind": h_wind}, height=120)
 
 st.markdown("#### 7-day forecast")
 df = pd.DataFrame({
