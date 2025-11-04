@@ -1,4 +1,4 @@
-# Weather — Click on Map (instant update + city name)
+# Weather — Click on Map (instant update + city popup)
 import requests
 import pandas as pd
 import streamlit as st
@@ -15,7 +15,6 @@ TIMEZONE_API = "https://timezone.open-meteo.com/v1/timezone"
 # ---------- helpers ----------
 @st.cache_data(ttl=3600, show_spinner=False)
 def reverse_geocode(lat: float, lon: float, language: str = "en"):
-    """Return nearest place info for a lat/lon. None on HTTP error."""
     try:
         r = requests.get(REVERSE, params={"latitude": lat, "longitude": lon, "language": language}, timeout=15)
         r.raise_for_status()
@@ -26,7 +25,6 @@ def reverse_geocode(lat: float, lon: float, language: str = "en"):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_timezone(lat: float, lon: float):
-    """Fetch IANA timezone for a coordinate. Returns 'auto' on failure."""
     try:
         r = requests.get(TIMEZONE_API, params={"latitude": lat, "longitude": lon}, timeout=10)
         r.raise_for_status()
@@ -70,10 +68,10 @@ if "loc" not in st.session_state:
 if "zoom" not in st.session_state:
     st.session_state["zoom"] = 5  # default zoom
 
-# ---------------- Map (center/marker uses current state) ----------------
 st.title("⛅ Weather — Click any place on the map")
-st.caption("放大到城市后点击地图即可。我们会立刻反向地理编码并刷新城市名和天气。")
+st.caption("点击地图立即显示该城市的天气；找不到城市名时显示坐标。")
 
+# ---------------- Map (center/marker uses current state) ----------------
 loc = st.session_state["loc"]
 
 m = folium.Map(
@@ -81,11 +79,18 @@ m = folium.Map(
     zoom_start=st.session_state["zoom"],
     tiles="cartodbpositron"
 )
-folium.Marker(
+
+# Popup（城市名 + 坐标），并默认展开 show=True
+popup_html = f"<b>{format_place(loc) or 'Selected point'}</b><br>{loc['latitude']:.4f}, {loc['longitude']:.4f}"
+popup = folium.Popup(popup_html, max_width=260, show=True)
+
+marker = folium.Marker(
     [loc["latitude"], loc["longitude"]],
     tooltip=f"{format_place(loc) or 'Selected point'}",
-    icon=folium.Icon(color="blue")
-).add_to(m)
+    icon=folium.Icon(color="blue"),
+)
+marker.add_to(m)
+popup.add_to(marker)  # 关键：让 popup 默认展开
 
 out = st_folium(m, height=480, use_container_width=True)
 
@@ -94,7 +99,7 @@ if out and out.get("last_clicked"):
     lat = float(out["last_clicked"]["lat"])
     lon = float(out["last_clicked"]["lng"])
 
-    rev = reverse_geocode(lat, lon)  # None if HTTP error / no result
+    rev = reverse_geocode(lat, lon)
     if rev:
         tz = rev.get("timezone") or get_timezone(lat, lon)
         name = rev.get("name") or rev.get("admin1") or "Selected point"
@@ -109,9 +114,8 @@ if out and out.get("last_clicked"):
         "name": name, "admin1": admin1, "country": country,
         "latitude": lat, "longitude": lon, "timezone": tz
     }
-    # 更近的视角，立刻看到标记落在城市
-    st.session_state["zoom"] = 10
-    st.experimental_rerun()  # 关键：马上重绘，立即看到新城市名和新标记
+    st.session_state["zoom"] = 10  # 更近，城市级
+    st.experimental_rerun()        # 立即重绘：标记移动、气泡展开、标题更新
 
 # ---------------- Weather display ----------------
 loc = st.session_state["loc"]
