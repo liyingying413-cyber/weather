@@ -1,4 +1,4 @@
-# Weather on Map — Click to get weather (no text search)
+# Weather — Click on Map only (robust reverse geocode + timezone fallback)
 import requests
 import pandas as pd
 import streamlit as st
@@ -10,17 +10,32 @@ st.set_page_config(page_title="Weather — Click on Map", page_icon="⛅", layou
 # ---------------- Open-Meteo endpoints ----------------
 REVERSE = "https://geocoding-api.open-meteo.com/v1/reverse"
 FORECAST = "https://api.open-meteo.com/v1/forecast"
+TIMEZONE_API = "https://timezone.open-meteo.com/v1/timezone"
 
+# ---------- helpers ----------
 @st.cache_data(ttl=3600, show_spinner=False)
 def reverse_geocode(lat: float, lon: float, language: str = "en"):
-    """Return nearest place info for a lat/lon."""
-    r = requests.get(REVERSE, params={"latitude": lat, "longitude": lon, "language": language}, timeout=20)
-    r.raise_for_status()
-    return (r.json().get("results") or [None])[0]
+    """Return nearest place info for a lat/lon. None on HTTP error."""
+    try:
+        r = requests.get(REVERSE, params={"latitude": lat, "longitude": lon, "language": language}, timeout=15)
+        r.raise_for_status()
+        results = r.json().get("results") or []
+        return results[0] if results else None
+    except Exception:
+        return None
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_timezone(lat: float, lon: float):
+    """Fetch IANA timezone for a coordinate. Returns 'auto' on failure."""
+    try:
+        r = requests.get(TIMEZONE_API, params={"latitude": lat, "longitude": lon}, timeout=10)
+        r.raise_for_status()
+        return (r.json() or {}).get("timezone", "auto")
+    except Exception:
+        return "auto"
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_forecast(lat: float, lon: float, tz: str, metric: bool):
-    """Fetch current, hourly (24h) and daily (7d) forecast."""
     params = {
         "latitude": lat, "longitude": lon, "timezone": tz or "auto",
         "current": ["temperature_2m","apparent_temperature","relative_humidity_2m","wind_speed_10m"],
@@ -36,21 +51,23 @@ def fetch_forecast(lat: float, lon: float, tz: str, metric: bool):
     return r.json()
 
 # ---------------- Sidebar (units only) ----------------
-st.sidebar.header("⚙️ Options")
+st.sidebar.header("Options")
 units = st.sidebar.radio("Units", ["metric (°C, km/h)", "imperial (°F, mph)"], index=0)
 metric = units.startswith("metric")
-if st.sidebar.button("🔄 Clear cache"):
+if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.experimental_rerun()
 
 # ---------------- Map ----------------
 st.title("⛅ Weather — Click any place on the map")
-st.caption("Tip: zoom to a city and click. The app will reverse-geocode that point and show its weather.")
+st.caption("Zoom到城市后点击地图即可。若点击海面或无人区，会自动回退为坐标点的天气。")
 
-# First load center（首尔）；用户点击后即更新为点击点
+# 首次默认到首尔；之后都以用户点击为准
 if "loc" not in st.session_state:
-    st.session_state["loc"] = {"name":"Seoul","admin1":"Seoul","country":"South Korea",
-                               "latitude":37.57,"longitude":126.98,"timezone":"Asia/Seoul"}
+    st.session_state["loc"] = {
+        "name": "Seoul", "admin1": "Seoul", "country": "South Korea",
+        "latitude": 37.57, "longitude": 126.98, "timezone": "Asia/Seoul"
+    }
 
 loc = st.session_state["loc"]
 m = folium.Map(location=[loc["latitude"], loc["longitude"]], zoom_start=5, tiles="cartodbpositron")
@@ -58,19 +75,27 @@ folium.Marker([loc["latitude"], loc["longitude"]],
               tooltip=f"{loc.get('name')}, {loc.get('country','')}",
               icon=folium.Icon(color="blue")).add_to(m)
 
-out = st_folium(m, height=480, use_container_width=True)  # 点击地图以获取 lat/lon
+out = st_folium(m, height=480, use_container_width=True)
 
-# When user clicks map -> reverse geocode -> update location
+# 处理点击：逆地理编码失败则使用时区兜底
 if out and out.get("last_clicked"):
-    lat = out["last_clicked"]["lat"]
-    lon = out["last_clicked"]["lng"]
-    rev = reverse_geocode(lat, lon) or {}
+    lat = float(out["last_clicked"]["lat"])
+    lon = float(out["last_clicked"]["lng"])
+
+    rev = reverse_geocode(lat, lon)  # None if HTTP error / no result
+    if rev:
+        tz = rev.get("timezone") or get_timezone(lat, lon)
+        name = rev.get("name") or rev.get("admin1") or "Selected point"
+        admin1 = rev.get("admin1")
+        country = rev.get("country")
+    else:
+        tz = get_timezone(lat, lon)
+        name = f"Selected point ({lat:.2f}, {lon:.2f})"
+        admin1, country = None, None
+
     st.session_state["loc"] = {
-        "name": rev.get("name") or rev.get("admin1") or "Selected point",
-        "admin1": rev.get("admin1"),
-        "country": rev.get("country"),
-        "latitude": lat, "longitude": lon,
-        "timezone": rev.get("timezone") or "auto"
+        "name": name, "admin1": admin1, "country": country,
+        "latitude": lat, "longitude": lon, "timezone": tz
     }
     loc = st.session_state["loc"]
 
@@ -78,7 +103,12 @@ if out and out.get("last_clicked"):
 place = " · ".join([x for x in [loc.get("name"), loc.get("admin1"), loc.get("country")] if x])
 st.markdown(f"### {place}")
 
-data = fetch_forecast(loc["latitude"], loc["longitude"], loc.get("timezone","auto"), metric)
+try:
+    data = fetch_forecast(loc["latitude"], loc["longitude"], loc.get("timezone","auto"), metric)
+except Exception as e:
+    st.error("Fetching forecast failed. Please click another point or try again.")
+    st.stop()
+
 cur, hourly, daily = data.get("current", {}), data.get("hourly", {}), data.get("daily", {})
 
 c1, c2, c3, c4 = st.columns(4)
